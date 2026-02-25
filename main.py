@@ -188,12 +188,12 @@ def main():
         with c1:
             if st.button("save keys", use_container_width=True):
                 storage.setItem("elevenlabs-key", elevenlabs_key)
-                storage.setItem("gemini-key", gemini_key)
+                storage.setItem("gemini-key", gemini_key, key="deleteItem2")
                 st.toast("keys saved!")
         with c2:
             if st.button("delete saved keys", use_container_width=True):
-                storage.setItem("elevenlabs-key", "")
-                storage.setItem("gemini-key", "")
+                storage.deleteItem("elevenlabs-key")
+                storage.deleteItem("gemini-key", key="deleteItem2")
 
         st.divider()
 

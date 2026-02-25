@@ -1,0 +1,22 @@
+[project]
+name = "infra"
+version = "1.0.0"
+license = "Unlicense"
+requires-python = ">=3.9"
+dependencies = [
+    "elevenlabs>=2.36.1",
+    "google-genai>=1.47.0",
+    "streamlit>=1.50.0",
+    "streamlit-local-storage>=0.0.25",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.1",
+]
+
+[tool.ruff]
+unsafe-fixes = true
+
+[tool.ruff.lint]
+select = ["E", "F", "UP", "B", "SIM", "I"]

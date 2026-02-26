@@ -93,6 +93,16 @@ class PersistentInputs:
             st.text_area, label, store_key, value, **kwargs
         )
 
+    def checkbox(self, label, store_key=None, value=False, **kwargs):
+        return self.create_widget(
+            st.checkbox, label, store_key, value, **kwargs
+        )
+
+    def number_input(self, label, store_key=None, value="min", **kwargs):
+        return self.create_widget(
+            st.number_input, label, store_key, value, **kwargs
+        )
+        
     def clear_saved_button(self, label="clear saved data", **kwargs):
         if st.button(label, **kwargs):
             for k in list(self.keys):

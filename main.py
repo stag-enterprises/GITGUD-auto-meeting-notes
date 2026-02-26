@@ -169,10 +169,8 @@ def main():
 
         st.header("transcription options")
         lang = pst.text_input("language", value="eng")
-        known_speakers = st.checkbox("known speaker count", value=False)
-        speakers = None
-        if known_speakers:
-            speakers = st.number_input(
+        if pst.checkbox("known speaker count", value=False):
+            speakers = pst.number_input(
                 "speakers", min_value=1, max_value=32, value=1, step=1
             )
 

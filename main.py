@@ -1,9 +1,8 @@
-import requests, json
-from uuid import uuid4
+import requests, json, time
 from elevenlabs.client import ElevenLabs
-from elevenlabs.types import WebhookHmacSettings
 import google.genai as google
 import streamlit as st
+import httpx
 from streamlit_local_storage import LocalStorage
 
 DEFAULT_PROMPT = """
@@ -49,48 +48,52 @@ List any topics that were tabled for future discussion, unanswered questions, or
 """.strip()
 
 
-def wait_for_data(log, url):
-    evts = requests.get(url, stream=True)
-    for l in evts.iter_lines():
-        if not l:
-            continue
-        text = l.decode("utf-8")
-        log.write(f"got event {text}")
+def wait_for_data(log, url, id):
+    log.write(f"listening to events on {url} for {id}")
+    with (
+        httpx.Client(http2=True) as client,
+        client.stream("GET", f"{url}/raw?since=latest", timeout=None) as r,
+    ):
+        log.write("connected!")
+        for l in r.iter_lines():
+            if not l:
+                continue
+            log.write(f"got message {l[:128]}")
 
-        try:
-            evt = json.loads(text)
-        except json.JSONDecodeError:
-            log.write("WARN could not parse as json")
+            try:
+                msg = json.loads(l)
+            except json.JSONDecodeError:
+                log.write("WARN could not parse as json")
+                continue
 
-        if evt.get("event") != "message":
-            continue
-        log.write(f"got message {evt}")
+            if msg.get("type") != "speech_to_text_transcription":
+                log.write("WARN recieved invalid message type")
+                continue
 
-        msg = evt.get("message", "{}")
-        try:
-            data = json.loads(msg)
-            if data.get("data"):
-                log.write(f"got data {msg}")
-                return data
-            else:
-                log.write(f"WARN failed to load {msg}")
-        except json.JSONDecodeError:
-            log.write(f"WARN failed to load {msg}")
+            data = msg.get("data")
+            if data is None:
+                log.write("WARN recieved no data")
+                continue
+
+            if data.get("request_id") != id:
+                log.write("wrong request id, ignoring")
+                continue
+
+            log.write("request id correct, continuing")
+            return data
 
 
-def transcribe(log, elevenlabs, file, lang, speakers):
-    hook = f"https://ntfy.adminforge.de/{uuid4()}/json"
+def transcribe(log, elevenlabs, file, webhook, lang, speakers):
+    log.write(f"looking for webhook with id {webhook}")
+    hooks = elevenlabs.webhooks.list().webhooks
+    hook = next((x for x in hooks if x.webhook_id == webhook), None)
 
-    print(f"creating webhook on {hook}")
-    hook_res = elevenlabs.webhooks.create(
-        settings=WebhookHmacSettings(
-            name="temp-meeting-notes-transcription-hook",
-            webhook_url=hook,
-        )
-    )
+    if hook is None:
+        log.write(f"ERROR could not find webhook {webhook}")
+        raise Exception("could not find the webhook")
 
-    print(f"sending stt request on {file.name}")
-    elevenlabs.speech_to_text.convert(
+    log.write(f"sending stt request on {file.name}")
+    req = elevenlabs.speech_to_text.convert(
         file=file,
         model_id="scribe_v2",
         tag_audio_events=True,
@@ -98,53 +101,47 @@ def transcribe(log, elevenlabs, file, lang, speakers):
         num_speakers=speakers,
         diarize=True,
         webhook=True,
-        webhook_id=hook_res.webhook_id,
+        webhook_id=hook.webhook_id,
     )
 
-    print(f"listening to events on {hook}")
-    res = wait_for_data(log, hook)
-
-    print(f"deleting webhook on {hook}")
-    elevenlabs.webhooks.delete(webhook_id=hook_res.webhook_id)
-
-    return res
+    return wait_for_data(log, hook.webhook_url, req.request_id)
 
 
 def format_trans(log, words):
     log.write("formatting the transcription")
-    res = ""
+    res = []
     pv_speaker = None
     for word in words:
         typ = word.get("type")
         text = word.get("text", "")
 
         speaker = word.get("speaker_id")
-        if speaker is not None:
-            nx_speaker = str(speaker).replace("speaker_", "")
-            if nx_speaker != pv_speaker:
-                res += f"\nPerson {nx_speaker}: "
-                pv_speaker = nx_speaker
+        if speaker and speaker != pv_speaker:
+            res.append(f"\nPerson {speaker.removeprefix("speaker_")}: ")
+            pv_speaker = speaker
 
-        if typ == "word" or typ == "spacing":
-            res += text
+        if typ in ("word", "spacing"):
+            res.append(text)
         elif typ == "audio_event":
-            res += f" *{text}* "
+            res.append(f" {text} ")
+        else:
+            log.write(f"WARN recieved unknown type {word}")
 
-    return res.strip()
+    return "".join(res).strip()
 
 
-def summarize(log, gemini, trans, prompt, extra_prompt):
-    log.write("generating summary using gemini 3.1 pro")
+def summarize(log, gemini, model, trans, prompt):
+    log.write(f"generating summary using {model}, this may take a while")
     res = gemini.models.generate_content(
-        model="gemini-3.1-pro-preview",
+        model=model,
         contents=(
-            f"Please summarize this transcript:\n<transcript>\n{trans}\n</transcript>\n"
+            "Please summarize this transcript:\n" +
+            f"<transcript>\n{trans}\n</transcript>\n"
         ),
         config=google.types.GenerateContentConfig(
             system_instruction=prompt,
             temperature=1,
             top_p=0.95,
-            top_k=20,
         ),
     )
 
@@ -155,12 +152,13 @@ def main():
     st.set_page_config(page_title="ai audio pipeline", layout="wide")
     st.title("transcription & summarization ai pipeline")
     st.markdown(
-        "upload audio file to produce formatted & diarzed transcript and summary"
+        "upload audio file to produce formatted & diarized transcript and summary"
     )
 
     storage = LocalStorage()
     sto_elevenlabs = storage.getItem("elevenlabs-key")
     sto_gemini = storage.getItem("gemini-key")
+    sto_webhook = storage.getItem("webhook-id")
 
     if (
         isinstance(sto_elevenlabs, str)
@@ -174,6 +172,12 @@ def main():
         and not st.session_state.get("gemini_inp")
     ):
         st.session_state["gemini_inp"] = sto_gemini
+    if (
+        isinstance(sto_webhook, str)
+        and sto_webhook
+        and not st.session_state.get("webhook_inp")
+    ):
+        st.session_state["webhook_inp"] = sto_webhook
 
     with st.sidebar:
         st.header("api keys")
@@ -183,17 +187,20 @@ def main():
         gemini_key = st.text_input(
             "google ai studio", type="password", key="gemini_inp"
         )
+        webhook = st.text_input("elevenlabs webhook id", key="webhook_inp")
 
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("save keys", use_container_width=True):
+            if st.button("save", use_container_width=True):
                 storage.setItem("elevenlabs-key", elevenlabs_key)
                 storage.setItem("gemini-key", gemini_key, key="deleteItem2")
+                storage.setItem("webhook-id", webhook, key="deleteItem3")
                 st.toast("keys saved!")
         with c2:
-            if st.button("delete saved keys", use_container_width=True):
+            if st.button("delete saved", use_container_width=True):
                 storage.deleteItem("elevenlabs-key")
                 storage.deleteItem("gemini-key", key="deleteItem2")
+                storage.deleteItem("webhook-id", key="deleteItem3")
 
         st.divider()
 
@@ -207,7 +214,8 @@ def main():
             )
 
         st.header("summarization options")
-        prompt = st.text_area("system prompt", value=DEFAULT_PROMPT, height=250)
+        model = st.text_input("model id", value="gemini-3.1-pro-preview")
+        prompt = st.text_area("system prompt", value=DEFAULT_PROMPT, height=400)
 
     file = st.file_uploader(
         "upload audio", type=["mp3", "wav", "m4a", "ogg", "flac"]
@@ -216,13 +224,13 @@ def main():
     if st.button("run!", type="primary"):
         if not elevenlabs_key:
             st.error("no elevenlabs api key")
-            return
+            st.stop()
         elif not gemini_key:
             st.error("no gemini api key")
-            return
+            st.stop()
         elif not file:
             st.error("no uploaded audio file")
-            return
+            st.stop()
 
         st.divider()
         st.subheader("current progress:")
@@ -236,27 +244,31 @@ def main():
                 res = transcribe(
                     log=s,
                     elevenlabs=elevenlabs,
+                    webhook=webhook,
                     file=file,
                     lang=lang,
                     speakers=speakers,
                 )
-                words = res.get("data", {}).get("words", [])
+                words = res.get("transcription", {}).get("words")
 
-                s.write("formatting the transcription")
+                if words is None:
+                    s.write("ERROR no words recieved?")
+                    raise Exception("invalid transcription")
+
                 trans = format_trans(log=s, words=words)
 
                 s.write("creating google gemini client")
-                with google.Client(api_key="API_KEY") as gemini:
-                    print("starting summarization, almost done soon!")
+                with google.Client(api_key=gemini_key) as gemini:
+                    s.write("starting summarization, almost done soon!")
                     summary = summarize(
-                        log=s, gemini=gemini, trans=trans, prompt=prompt
+                        log=s, gemini=gemini, trans=trans, prompt=prompt, model=model
                     )
 
                 s.update(label="finished!", state="complete", expanded=False)
             except Exception as e:
                 s.update(label=f"ERROR: {e}", state="error", expanded=True)
                 st.exception(e)
-                return
+                st.stop()
 
         st.success("processing done")
 

@@ -3,7 +3,7 @@ from elevenlabs.client import ElevenLabs
 import google.genai as google
 import streamlit as st
 import httpx
-from streamlit_local_storage import LocalStorage
+from persistence import PersistentInputs
 
 DEFAULT_PROMPT = """
 You are an Expert Executive Assistant and Technical Project Manager. Your task is to provide a highly detailed, comprehensive summary of the provided meeting transcript.
@@ -117,7 +117,7 @@ def format_trans(log, words):
 
         speaker = word.get("speaker_id")
         if speaker and speaker != pv_speaker:
-            res.append(f"\nPerson {speaker.removeprefix("speaker_")}: ")
+            res.append(f"\nPerson {speaker.removeprefix('speaker_')}: ")
             pv_speaker = speaker
 
         if typ in ("word", "spacing"):
@@ -135,8 +135,8 @@ def summarize(log, gemini, model, trans, prompt):
     res = gemini.models.generate_content(
         model=model,
         contents=(
-            "Please summarize this transcript:\n" +
-            f"<transcript>\n{trans}\n</transcript>\n"
+            "Please summarize this transcript:\n"
+            + f"<transcript>\n{trans}\n</transcript>\n"
         ),
         config=google.types.GenerateContentConfig(
             system_instruction=prompt,
@@ -155,57 +155,20 @@ def main():
         "upload audio file to produce formatted & diarized transcript and summary"
     )
 
-    storage = LocalStorage()
-    sto_elevenlabs = storage.getItem("elevenlabs-key")
-    sto_gemini = storage.getItem("gemini-key")
-    sto_webhook = storage.getItem("webhook-id")
+    pst = PersistentInputs()
 
-    if (
-        isinstance(sto_elevenlabs, str)
-        and sto_elevenlabs
-        and not st.session_state.get("elevenlabs_inp")
-    ):
-        st.session_state["elevenlabs_inp"] = sto_elevenlabs
-    if (
-        isinstance(sto_gemini, str)
-        and sto_gemini
-        and not st.session_state.get("gemini_inp")
-    ):
-        st.session_state["gemini_inp"] = sto_gemini
-    if (
-        isinstance(sto_webhook, str)
-        and sto_webhook
-        and not st.session_state.get("webhook_inp")
-    ):
-        st.session_state["webhook_inp"] = sto_webhook
+    pst.clear_saved_button()
 
     with st.sidebar:
         st.header("api keys")
-        elevenlabs_key = st.text_input(
-            "elevenlabs", type="password", key="elevenlabs_inp"
-        )
-        gemini_key = st.text_input(
-            "google ai studio", type="password", key="gemini_inp"
-        )
-        webhook = st.text_input("elevenlabs webhook id", key="webhook_inp")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("save", use_container_width=True):
-                storage.setItem("elevenlabs-key", elevenlabs_key)
-                storage.setItem("gemini-key", gemini_key, key="deleteItem2")
-                storage.setItem("webhook-id", webhook, key="deleteItem3")
-                st.toast("keys saved!")
-        with c2:
-            if st.button("delete saved", use_container_width=True):
-                storage.deleteItem("elevenlabs-key")
-                storage.deleteItem("gemini-key", key="deleteItem2")
-                storage.deleteItem("webhook-id", key="deleteItem3")
+        elevenlabs_key = pst.text_input("elevenlabs", type="password")
+        gemini_key = pst.text_input("google ai studio", type="password")
+        webhook = pst.text_input("elevenlabs webhook id")
 
         st.divider()
 
         st.header("transcription options")
-        lang = st.text_input("language", value="eng")
+        lang = pst.text_input("language", value="eng")
         known_speakers = st.checkbox("known speaker count", value=False)
         speakers = None
         if known_speakers:
@@ -214,8 +177,10 @@ def main():
             )
 
         st.header("summarization options")
-        model = st.text_input("model id", value="gemini-3.1-pro-preview")
-        prompt = st.text_area("system prompt", value=DEFAULT_PROMPT, height=400)
+        model = pst.text_input("model id", value="gemini-3.1-pro-preview")
+        prompt = pst.text_area(
+            "system prompt", value=DEFAULT_PROMPT, height=400
+        )
 
     file = st.file_uploader(
         "upload audio", type=["mp3", "wav", "m4a", "ogg", "flac"]
@@ -261,7 +226,11 @@ def main():
                 with google.Client(api_key=gemini_key) as gemini:
                     s.write("starting summarization, almost done soon!")
                     summary = summarize(
-                        log=s, gemini=gemini, trans=trans, prompt=prompt, model=model
+                        log=s,
+                        gemini=gemini,
+                        trans=trans,
+                        prompt=prompt,
+                        model=model,
                     )
 
                 s.update(label="finished!", state="complete", expanded=False)
@@ -306,6 +275,7 @@ def main():
                 mime="text/markdown",
                 use_container_width=True,
             )
+
 
 if __name__ == "__main__":
     main()
